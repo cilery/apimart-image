@@ -1,0 +1,4 @@
+interface:
+  display_name: "APIMart Image"
+  short_description: "调用 APIMart 图像模型进行生成、编辑和批量任务"
+  default_prompt: "Use $apimart-image to generate or edit images with an APIMart image model."
