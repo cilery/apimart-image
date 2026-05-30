@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="APIMART image model name.")
     parser.add_argument("--prompt", help="Generation prompt.")
     parser.add_argument("--size", help="Model-specific size or aspect ratio.")
-    parser.add_argument("--resolution", help="Model-specific resolution.")
+    parser.add_argument("--resolution", default="1K", help="Model-specific resolution. Defaults to 1K.")
     parser.add_argument("--output", help="Output file path for a single image.")
     parser.add_argument("--output-dir", help="Output directory for generated files.")
     parser.add_argument("--retry", type=int, default=3, help="Retry count for task creation.")
@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
 def task_to_options(task: dict, args: argparse.Namespace) -> dict:
     return {
         "size": task.get("size", args.size),
-        "resolution": task.get("resolution", args.resolution),
+        "resolution": task.get("resolution") or args.resolution or "1K",
         "official_fallback": task.get("official_fallback", args.official_fallback),
         "quality": task.get("quality", args.quality),
         "background": task.get("background", args.background),

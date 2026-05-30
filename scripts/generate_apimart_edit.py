@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", action="append", dest="inputs", help="Input image path or URL. Repeatable.")
     parser.add_argument("--mask", help="Optional mask image path or URL.")
     parser.add_argument("--size", help="Model-specific size or aspect ratio.")
-    parser.add_argument("--resolution", help="Model-specific resolution.")
+    parser.add_argument("--resolution", default="1K", help="Model-specific resolution. Defaults to 1K.")
     parser.add_argument("--output", help="Output file path for a single image.")
     parser.add_argument("--output-dir", help="Output directory for generated files.")
     parser.add_argument("--retry", type=int, default=3, help="Retry count for task creation.")
@@ -81,7 +81,7 @@ def resolve_task_inputs(task: dict, args: argparse.Namespace) -> list[str]:
 def task_to_options(task: dict, args: argparse.Namespace, mask_url: str | None) -> dict:
     return {
         "size": task.get("size", args.size),
-        "resolution": task.get("resolution", args.resolution),
+        "resolution": task.get("resolution") or args.resolution or "1K",
         "official_fallback": task.get("official_fallback", args.official_fallback),
         "quality": task.get("quality", args.quality),
         "background": task.get("background", args.background),

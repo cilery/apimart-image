@@ -35,6 +35,11 @@ Supported model families:
 
 Read `references/apimart-images.md` when model-specific payload details matter.
 
+Default behavior when the user does not specify otherwise:
+
+- model: `gpt-image-2`
+- resolution: `1K`
+
 ## Behavior Rules
 
 - Respect the user's requested style and constraints. Do not silently add Chinese-style assumptions.
@@ -117,6 +122,8 @@ python C:\Users\29664\.codex\skills\apimart-image\scripts\generate_apimart.py `
   --resolution 2K `
   --output .\outimage\apimart-image\20260529_1900_lighthouse.png
 ```
+
+If the user does not explicitly specify a resolution, use `1K`.
 
 Example with `gemini-3.1-flash-image-preview`:
 
