@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from _apimart_common import (
     print_warning,
     resolve_api_key,
     resolve_model_name,
+    run_batched_tasks,
     run_setup,
     validate_model_inputs,
     build_generation_payload,
@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-compression", type=int, help="Model-specific output compression.")
     parser.add_argument("--n", type=int, help="Number of requested images for supported models.")
     parser.add_argument("--batch", help="JSON array of generation tasks.")
+    parser.add_argument("--workers", type=int, default=0, help="Batch worker count. 0 uses the default.")
     return parser
 
 
@@ -116,6 +117,18 @@ def run_single_task(client: ApimartClient, args: argparse.Namespace, task: dict,
     return saved_paths
 
 
+def run_batch_task(
+    api_key: str,
+    base_url: str,
+    timeout: int,
+    args: argparse.Namespace,
+    task: dict,
+    index: int,
+) -> list[Path]:
+    with ApimartClient(base_url=base_url, api_key=api_key, timeout=timeout) as client:
+        return run_single_task(client, args, task, index=index)
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -133,13 +146,26 @@ def main() -> int:
         _ = get_model_spec(model_name)
         api_key = resolve_api_key(args.api_key)
         base_url = coerce_base_url(args.base_url)
-        with ApimartClient(base_url=base_url, api_key=api_key, timeout=args.timeout) as client:
-            if args.batch:
-                tasks = load_batch_tasks(args.batch)
-                for idx, task in enumerate(tasks):
-                    task.setdefault("model", model_name)
-                    run_single_task(client, args, task, index=idx)
-            else:
+        if args.batch:
+            tasks = load_batch_tasks(args.batch)
+            for task in tasks:
+                task.setdefault("model", model_name)
+
+            run_batched_tasks(
+                tasks=tasks,
+                workers=args.workers,
+                runner=lambda idx, task: run_batch_task(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=args.timeout,
+                    args=args,
+                    task=task,
+                    index=idx,
+                ),
+                label="apimart-image generate batch",
+            )
+        else:
+            with ApimartClient(base_url=base_url, api_key=api_key, timeout=args.timeout) as client:
                 run_single_task(client, args, {"model": model_name}, index=0)
         return 0
     except ApimartImageError as exc:

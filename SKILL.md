@@ -21,6 +21,7 @@ Supported tasks:
 - mask-based editing for models that support it
 - batch generation
 - batch editing
+- concurrent batch generation and editing with `--workers`
 
 Supported model families:
 
@@ -42,6 +43,7 @@ Read `references/apimart-images.md` when model-specific payload details matter.
 - Save outputs under the current workspace when possible. Prefer `.\outimage\apimart-image\`.
 - Do not claim an image was generated until the script completes successfully and the output file exists.
 - Gemini models in this skill use APIMart's Gemini image generation route with aspect-ratio-like `--size` values such as `1:1` or `16:9`.
+- This skill accepts the 10 common aspect ratios exposed by `ikunimage`: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `21:9`, `5:4`, `4:5`.
 
 ## First-Time Setup
 
@@ -61,7 +63,7 @@ $env:APIMART_API_KEY="sk-your-key"
 
 Alternative config file:
 
-- Path: `C:\Users\29664\.apimart-image\config.json`
+- Path: `C:\Users\29664\.codex\skills\apimart-image\config.json`
 - Content:
 
 ```json
@@ -74,7 +76,7 @@ API key resolution order:
 
 1. `--api-key`
 2. `APIMART_API_KEY`
-3. `C:\Users\29664\.apimart-image\config.json`
+3. `C:\Users\29664\.codex\skills\apimart-image\config.json`
 
 Optional base URL override:
 
@@ -96,6 +98,7 @@ $env:APIMART_BASE_URL="https://api.apimart.ai"
    - model
    - size or aspect-ratio-like size value
    - resolution
+   - worker count for batch runs when the user wants parallelism
    - output path
 4. Run the appropriate local script.
 5. Return the saved file path, task id, and source image URL(s).
@@ -121,7 +124,7 @@ Example with `gemini-3.1-flash-image-preview`:
 python C:\Users\29664\.codex\skills\apimart-image\scripts\generate_apimart.py `
   --model gemini-3.1-flash-image-preview `
   --prompt "A clean editorial portrait of a watchmaker in a bright workshop, realistic lighting, shallow depth of field" `
-  --size 1:1 `
+  --size 4:5 `
   --resolution 2K `
   --output .\outimage\apimart-image\20260529_1905_watchmaker.png
 ```
@@ -161,6 +164,8 @@ python C:\Users\29664\.codex\skills\apimart-image\scripts\generate_apimart_edit.
 
 Use `generate_apimart.py --batch` or `generate_apimart_edit.py --batch`.
 
+Use `--workers 2` or higher to run multiple APIMart tasks in parallel when the provider and your rate limits allow it.
+
 Text-to-image batch example:
 
 ```json
@@ -180,6 +185,14 @@ Text-to-image batch example:
     "output": "./outimage/apimart-image/skincare-shot.png"
   }
 ]
+```
+
+Batch run example:
+
+```powershell
+python C:\Users\29664\.codex\skills\apimart-image\scripts\generate_apimart.py `
+  --batch .\tasks.json `
+  --workers 2
 ```
 
 Edit batch example:

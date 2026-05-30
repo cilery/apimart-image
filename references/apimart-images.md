@@ -111,7 +111,7 @@ Gemini-specific constraints enforced by this skill:
 - `image_urls` maximum: 14
 - `n`: `1-4`
 - `mask_url`: not supported
-- `size` must be one of `1:1`, `3:4`, `4:3`, `9:16`, `16:9`, `21:9`
+- `size` must be one of `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `21:9`, `5:4`, `4:5`
 - `resolution` must be one of `1K`, `2K`, `4K`
 
 Fields ignored with warnings:
@@ -164,6 +164,14 @@ Text-to-image:
 ]
 ```
 
+You can run batch jobs concurrently with `--workers`:
+
+```powershell
+python C:\Users\29664\.codex\skills\apimart-image\scripts\generate_apimart.py `
+  --batch .\tasks.json `
+  --workers 2
+```
+
 Image edit:
 
 ```json
@@ -181,7 +189,7 @@ Image edit:
 
 ## Error Handling Notes
 
-- Missing API key: use `--setup`, `APIMART_API_KEY`, or `C:\Users\29664\.apimart-image\config.json`.
+- Missing API key: use `--setup`, `APIMART_API_KEY`, or `C:\Users\29664\.codex\skills\apimart-image\config.json`.
 - Unsupported field combination: fail early with a clear message.
 - Task completed without image URLs: treat as an API or payload-shape error and show the task payload.
 - Download failure after a successful task: report the remote URL and the HTTP status.

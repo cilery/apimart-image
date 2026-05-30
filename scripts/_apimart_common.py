@@ -9,9 +9,10 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.parse import urlparse
 
 try:
@@ -22,7 +23,8 @@ except ImportError as exc:  # pragma: no cover
 
 DEFAULT_BASE_URL = "https://api.apimart.ai"
 DEFAULT_OUTPUT_DIR = Path("./outimage/apimart-image")
-CONFIG_DIR = Path.home() / ".apimart-image"
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_DIR = SKILL_ROOT
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_MODEL = "gpt-image-2"
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -32,13 +34,20 @@ MAX_UPLOAD_IMAGE_COUNT = 16
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 VALID_GEMINI_ASPECT_RATIOS = {
     "1:1",
+    "2:3",
+    "3:2",
     "3:4",
     "4:3",
+    "4:5",
+    "5:4",
     "9:16",
     "16:9",
     "21:9",
 }
 VALID_GEMINI_RESOLUTIONS = {"1K", "2K", "4K"}
+MAX_NETWORK_RETRIES = 3
+DEFAULT_BATCH_WORKERS = 2
+BatchResultT = TypeVar("BatchResultT")
 
 
 class ApimartImageError(RuntimeError):
@@ -356,6 +365,46 @@ def ensure_output_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def resolve_worker_count(num_tasks: int, workers: int, default_workers: int = DEFAULT_BATCH_WORKERS) -> int:
+    if num_tasks <= 0:
+        return 0
+    if workers <= 0:
+        workers = min(num_tasks, default_workers)
+    return max(1, min(workers, num_tasks))
+
+
+def run_batched_tasks(
+    tasks: list[dict[str, Any]],
+    workers: int,
+    runner: Callable[[int, dict[str, Any]], BatchResultT],
+    label: str,
+) -> list[BatchResultT]:
+    task_count = len(tasks)
+    if task_count == 0:
+        return []
+
+    worker_count = resolve_worker_count(task_count, workers)
+    print_info(f"[{label}] tasks={task_count} workers={worker_count}")
+    results: list[BatchResultT | None] = [None] * task_count
+
+    def invoke(index: int, task: dict[str, Any]) -> tuple[int, BatchResultT]:
+        return index, runner(index, task)
+
+    if worker_count == 1:
+        for index, task in enumerate(tasks):
+            _, result = invoke(index, task)
+            results[index] = result
+        return [result for result in results if result is not None]
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [pool.submit(invoke, index, task) for index, task in enumerate(tasks)]
+        for future in as_completed(futures):
+            index, result = future.result()
+            results[index] = result
+
+    return [result for result in results if result is not None]
+
+
 def load_batch_tasks(batch_path: str | Path) -> list[dict[str, Any]]:
     path = Path(batch_path)
     try:
@@ -501,21 +550,44 @@ class ApimartClient:
         response = self._client.request(method, url, **kwargs)
         return response
 
-    def upload_image(self, image_path: str | Path) -> str:
+    def _sleep_before_retry(self, attempt: int) -> None:
+        time.sleep(min(2**attempt, 8))
+
+    def _should_retry_transport_error(self, attempt: int, retries: int, exc: httpx.TransportError) -> bool:
+        if attempt >= retries:
+            return False
+        print_warning(f"Transient network error: {exc}. Retrying...")
+        self._sleep_before_retry(attempt)
+        return True
+
+    def upload_image(self, image_path: str | Path, retries: int = MAX_NETWORK_RETRIES) -> str:
         raw, mime_type = read_local_image(image_path)
-        response = self._client.post(
-            self.base_url + "/v1/uploads/images",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            files={"file": (Path(image_path).name, raw, mime_type)},
-        )
-        if response.status_code >= 400:
-            raise ApimartImageError(f"Upload failed: HTTP {response.status_code} {response.text[:400]}")
-        return extract_upload_url(response.json())
+        for attempt in range(retries + 1):
+            try:
+                response = self._client.post(
+                    self.base_url + "/v1/uploads/images",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    files={"file": (Path(image_path).name, raw, mime_type)},
+                )
+            except httpx.TransportError as exc:
+                if self._should_retry_transport_error(attempt, retries, exc):
+                    continue
+                raise ApimartImageError(f"Upload failed after retries: {exc}") from exc
+            if response.status_code >= 400:
+                raise ApimartImageError(f"Upload failed: HTTP {response.status_code} {response.text[:400]}")
+            return extract_upload_url(response.json())
+        raise ApimartImageError("Upload failed after retries: unknown error")
 
     def create_generation_task(self, payload: dict[str, Any], retries: int = 3) -> tuple[str, dict[str, Any]]:
         last_error: str | None = None
         for attempt in range(retries + 1):
-            response = self._request("POST", "/v1/images/generations", json=payload)
+            try:
+                response = self._request("POST", "/v1/images/generations", json=payload)
+            except httpx.TransportError as exc:
+                if self._should_retry_transport_error(attempt, retries, exc):
+                    last_error = str(exc)
+                    continue
+                raise ApimartImageError(f"Task creation failed after retries: {exc}") from exc
             if response.status_code < 400:
                 body = response.json()
                 task_id = extract_task_id(body)
@@ -527,7 +599,7 @@ class ApimartClient:
                     f"Task creation failed: HTTP {response.status_code} {response.text[:400]}"
                 )
             last_error = response.text[:400]
-            time.sleep(min(2**attempt, 8))
+            self._sleep_before_retry(attempt)
         raise ApimartImageError(f"Task creation failed after retries: {last_error or 'unknown error'}")
 
     def poll_task(
@@ -537,8 +609,15 @@ class ApimartClient:
         timeout_seconds: int = 600,
     ) -> dict[str, Any]:
         deadline = time.time() + timeout_seconds
+        last_transport_error: httpx.TransportError | None = None
         while time.time() < deadline:
-            response = self._request("GET", f"/v1/tasks/{task_id}")
+            try:
+                response = self._request("GET", f"/v1/tasks/{task_id}")
+            except httpx.TransportError as exc:
+                last_transport_error = exc
+                print_warning(f"Transient polling error for task '{task_id}': {exc}. Retrying...")
+                time.sleep(poll_interval)
+                continue
             if response.status_code >= 400:
                 raise ApimartImageError(
                     f"Task status check failed: HTTP {response.status_code} {response.text[:400]}"
@@ -550,17 +629,28 @@ class ApimartClient:
             if status in POLL_FAILED_STATUSES:
                 raise ApimartImageError(f"Task '{task_id}' failed with payload: {payload}")
             time.sleep(poll_interval)
+        if last_transport_error is not None:
+            raise ApimartImageError(
+                f"Timed out waiting for task '{task_id}' after transient polling errors: {last_transport_error}"
+            ) from last_transport_error
         raise ApimartImageError(f"Timed out waiting for task '{task_id}'.")
 
-    def download_image(self, url: str, output_path: Path) -> Path:
+    def download_image(self, url: str, output_path: Path, retries: int = MAX_NETWORK_RETRIES) -> Path:
         ensure_output_parent(output_path)
-        response = self._client.get(url, headers={"Authorization": f"Bearer {self.api_key}"})
-        if response.status_code >= 400:
-            raise ApimartImageError(
-                f"Image download failed: HTTP {response.status_code} {response.text[:400]}"
-            )
-        output_path.write_bytes(response.content)
-        return output_path
+        for attempt in range(retries + 1):
+            try:
+                response = self._client.get(url, headers={"Authorization": f"Bearer {self.api_key}"})
+            except httpx.TransportError as exc:
+                if self._should_retry_transport_error(attempt, retries, exc):
+                    continue
+                raise ApimartImageError(f"Image download failed after retries: {exc}") from exc
+            if response.status_code >= 400:
+                raise ApimartImageError(
+                    f"Image download failed: HTTP {response.status_code} {response.text[:400]}"
+                )
+            output_path.write_bytes(response.content)
+            return output_path
+        raise ApimartImageError("Image download failed after retries: unknown error")
 
 
 def coerce_base_url(cli_value: str | None) -> str:

@@ -23,6 +23,7 @@ from _apimart_common import (
     print_warning,
     resolve_api_key,
     resolve_model_name,
+    run_batched_tasks,
     run_setup,
     validate_model_inputs,
 )
@@ -53,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-compression", type=int, help="Model-specific output compression.")
     parser.add_argument("--n", type=int, help="Number of requested images for supported models.")
     parser.add_argument("--batch", help="JSON array of edit tasks.")
+    parser.add_argument("--workers", type=int, default=0, help="Batch worker count. 0 uses the default.")
     return parser
 
 
@@ -60,6 +62,20 @@ def upload_if_needed(client: ApimartClient, value: str) -> str:
     if is_remote_url(value):
         return value
     return client.upload_image(value)
+
+
+def resolve_task_inputs(task: dict, args: argparse.Namespace) -> list[str]:
+    inputs = task.get("inputs")
+    if inputs is None:
+        legacy_input = task.get("input")
+        if legacy_input is not None:
+            if isinstance(legacy_input, list):
+                inputs = legacy_input
+            else:
+                inputs = [legacy_input]
+    if inputs is None:
+        inputs = args.inputs or []
+    return list(inputs)
 
 
 def task_to_options(task: dict, args: argparse.Namespace, mask_url: str | None) -> dict:
@@ -83,9 +99,7 @@ def run_single_task(client: ApimartClient, args: argparse.Namespace, task: dict,
     if not prompt:
         raise ApimartImageError("A prompt is required.")
 
-    inputs = task.get("inputs")
-    if inputs is None:
-        inputs = args.inputs or []
+    inputs = resolve_task_inputs(task, args)
     if not inputs:
         raise ApimartImageError("At least one --input image is required for edit mode.")
 
@@ -132,6 +146,18 @@ def run_single_task(client: ApimartClient, args: argparse.Namespace, task: dict,
     return saved_paths
 
 
+def run_batch_task(
+    api_key: str,
+    base_url: str,
+    timeout: int,
+    args: argparse.Namespace,
+    task: dict,
+    index: int,
+) -> list[Path]:
+    with ApimartClient(base_url=base_url, api_key=api_key, timeout=timeout) as client:
+        return run_single_task(client, args, task, index=index)
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -147,13 +173,26 @@ def main() -> int:
         _ = get_model_spec(model_name)
         api_key = resolve_api_key(args.api_key)
         base_url = coerce_base_url(args.base_url)
-        with ApimartClient(base_url=base_url, api_key=api_key, timeout=args.timeout) as client:
-            if args.batch:
-                tasks = load_batch_tasks(args.batch)
-                for idx, task in enumerate(tasks):
-                    task.setdefault("model", model_name)
-                    run_single_task(client, args, task, index=idx)
-            else:
+        if args.batch:
+            tasks = load_batch_tasks(args.batch)
+            for task in tasks:
+                task.setdefault("model", model_name)
+
+            run_batched_tasks(
+                tasks=tasks,
+                workers=args.workers,
+                runner=lambda idx, task: run_batch_task(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=args.timeout,
+                    args=args,
+                    task=task,
+                    index=idx,
+                ),
+                label="apimart-image edit batch",
+            )
+        else:
+            with ApimartClient(base_url=base_url, api_key=api_key, timeout=args.timeout) as client:
                 run_single_task(client, args, {"model": model_name}, index=0)
         return 0
     except ApimartImageError as exc:
